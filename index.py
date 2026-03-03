@@ -31,11 +31,28 @@ TAG_USAGE = 'TaggerUsage'
 class ResourceCleaner:
     
     def __init__(self, secret_id: Optional[str] = None, secret_key: Optional[str] = None):
-        self.secret_id = secret_id or os.environ.get('TENCENTCLOUD_SECRET_ID')
-        self.secret_key = secret_key or os.environ.get('TENCENTCLOUD_SECRET_KEY')
+        candidates = [
+            ('TENCENTCLOUD_SECRETID', 'TENCENTCLOUD_SECRETKEY', 'TENCENTCLOUD_SESSIONTOKEN'),
+            ('TENCENTCLOUD_SECRET_ID', 'TENCENTCLOUD_SECRET_KEY', 'TENCENTCLOUD_SESSION_TOKEN'),
+        ]
+        
+        self.secret_id = secret_id
+        self.secret_key = secret_key
+        self.token = None
         
         if not self.secret_id or not self.secret_key:
-            logger.warning("No credentials provided. Will use CAM role in SCF environment.")
+            for id_key, key_key, token_key in candidates:
+                sid = os.environ.get(id_key)
+                skey = os.environ.get(key_key)
+                if sid and skey:
+                    self.secret_id = sid
+                    self.secret_key = skey
+                    self.token = os.environ.get(token_key)
+                    logger.info(f"Using credentials from env vars: {id_key}, token={'yes' if self.token else 'no'}")
+                    break
+        
+        if not self.secret_id or not self.secret_key:
+            raise RuntimeError("No credentials found. Configure SCF execution role or set TENCENTCLOUD_SECRETID/TENCENTCLOUD_SECRETKEY env vars.")
         
         self.stats = {
             'clb': {
@@ -55,7 +72,10 @@ class ResourceCleaner:
         }
     
     def get_clb_client(self, region: str):
-        cred = credential.Credential(self.secret_id, self.secret_key)
+        if self.token:
+            cred = credential.Credential(self.secret_id, self.secret_key, self.token)
+        else:
+            cred = credential.Credential(self.secret_id, self.secret_key)
         http_profile = HttpProfile()
         http_profile.endpoint = "clb.tencentcloudapi.com"
         client_profile = ClientProfile()
@@ -63,7 +83,10 @@ class ResourceCleaner:
         return clb_client.ClbClient(cred, region, client_profile)
     
     def get_cbs_client(self, region: str):
-        cred = credential.Credential(self.secret_id, self.secret_key)
+        if self.token:
+            cred = credential.Credential(self.secret_id, self.secret_key, self.token)
+        else:
+            cred = credential.Credential(self.secret_id, self.secret_key)
         http_profile = HttpProfile()
         http_profile.endpoint = "cbs.tencentcloudapi.com"
         client_profile = ClientProfile()
@@ -73,10 +96,10 @@ class ResourceCleaner:
     def get_all_regions(self) -> List[str]:
         return [
             'ap-bangkok', 'ap-beijing', 'ap-chengdu', 'ap-chongqing',
-            'ap-guangzhou', 'ap-hongkong', 'ap-jakarta', 'ap-mumbai',
+            'ap-guangzhou', 'ap-hongkong', 'ap-jakarta',
             'ap-nanjing', 'ap-seoul', 'ap-shanghai', 'ap-shanghai-fsi',
             'ap-shenzhen-fsi', 'ap-singapore', 'ap-tokyo', 'eu-frankfurt',
-            'eu-moscow', 'na-ashburn', 'na-siliconvalley', 'na-toronto',
+            'na-ashburn', 'na-siliconvalley',
             'sa-saopaulo'
         ]
     
@@ -140,23 +163,35 @@ class ResourceCleaner:
     def describe_clbs_with_tags(self, region: str) -> List:
         try:
             client = self.get_clb_client(region)
-            request = clb_models.DescribeLoadBalancersRequest()
+            all_clbs = []
+            offset = 0
+            limit = 100
             
-            params = {
-                "Filters": [
-                    {
-                        "Name": f"tag:{TAG_TTL}",
-                        "Values": []
-                    }
-                ]
-            }
-            request.from_json_string(json.dumps(params))
+            while True:
+                request = clb_models.DescribeLoadBalancersRequest()
+                params = {"Offset": offset, "Limit": limit}
+                request.from_json_string(json.dumps(params))
+                
+                response = client.DescribeLoadBalancers(request)
+                clbs = response.LoadBalancerSet if hasattr(response, 'LoadBalancerSet') else []
+                total = response.TotalCount if hasattr(response, 'TotalCount') else 0
+                all_clbs.extend(clbs)
+                
+                if len(all_clbs) >= total or len(clbs) == 0:
+                    break
+                offset += limit
             
-            response = client.DescribeLoadBalancers(request)
-            clbs = response.LoadBalancerSet if hasattr(response, 'LoadBalancerSet') else []
+            # Filter: only CLBs that have a TaggerTTL tag
+            tagged_clbs = []
+            for clb in all_clbs:
+                tags = getattr(clb, 'Tags', []) or []
+                for tag in tags:
+                    if hasattr(tag, 'TagKey') and tag.TagKey == TAG_TTL:
+                        tagged_clbs.append(clb)
+                        break
             
-            logger.info(f"Found {len(clbs)} CLB instances with {TAG_TTL} tag in region {region}")
-            return clbs
+            logger.info(f"Found {len(all_clbs)} total CLBs, {len(tagged_clbs)} with {TAG_TTL} tag in region {region}")
+            return tagged_clbs
             
         except TencentCloudSDKException as e:
             if 'InvalidParameter' in str(e):
@@ -272,23 +307,35 @@ class ResourceCleaner:
     def describe_cbs_with_tags(self, region: str) -> List:
         try:
             client = self.get_cbs_client(region)
-            request = cbs_models.DescribeDisksRequest()
+            all_disks = []
+            offset = 0
+            limit = 100
             
-            params = {
-                "Filters": [
-                    {
-                        "Name": f"tag:{TAG_TTL}",
-                        "Values": []
-                    }
-                ]
-            }
-            request.from_json_string(json.dumps(params))
+            while True:
+                request = cbs_models.DescribeDisksRequest()
+                params = {"Offset": offset, "Limit": limit}
+                request.from_json_string(json.dumps(params))
+                
+                response = client.DescribeDisks(request)
+                disks = response.DiskSet if hasattr(response, 'DiskSet') else []
+                total = response.TotalCount if hasattr(response, 'TotalCount') else 0
+                all_disks.extend(disks)
+                
+                if len(all_disks) >= total or len(disks) == 0:
+                    break
+                offset += limit
             
-            response = client.DescribeDisks(request)
-            disks = response.DiskSet if hasattr(response, 'DiskSet') else []
+            # Filter: only disks that have a TaggerTTL tag
+            tagged_disks = []
+            for disk in all_disks:
+                tags = getattr(disk, 'Tags', []) or []
+                for tag in tags:
+                    if hasattr(tag, 'TagKey') and tag.TagKey == TAG_TTL:
+                        tagged_disks.append(disk)
+                        break
             
-            logger.info(f"Found {len(disks)} CBS disks with {TAG_TTL} tag in region {region}")
-            return disks
+            logger.info(f"Found {len(all_disks)} total CBS disks, {len(tagged_disks)} with {TAG_TTL} tag in region {region}")
+            return tagged_disks
             
         except TencentCloudSDKException as e:
             if 'InvalidParameter' in str(e):

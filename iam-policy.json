@@ -6,9 +6,8 @@
       "action": [
         "name/clb:DescribeLoadBalancers",
         "name/clb:DeleteLoadBalancer",
-        "name/cvm:DescribeDisks",
-        "name/cvm:TerminateDisks",
-        "name/tag:DescribeResourcesByTags"
+        "name/cbs:DescribeDisks",
+        "name/cbs:TerminateDisks"
       ],
       "resource": "*"
     }
