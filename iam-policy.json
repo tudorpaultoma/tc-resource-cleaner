@@ -1,0 +1,16 @@
+{
+  "version": "2.0",
+  "statement": [
+    {
+      "effect": "allow",
+      "action": [
+        "name/clb:DescribeLoadBalancers",
+        "name/clb:DeleteLoadBalancer",
+        "name/cvm:DescribeDisks",
+        "name/cvm:TerminateDisks",
+        "name/tag:DescribeResourcesByTags"
+      ],
+      "resource": "*"
+    }
+  ]
+}

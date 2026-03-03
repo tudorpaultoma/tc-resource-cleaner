@@ -1,0 +1,2 @@
+tencentcloud-sdk-python>=3.0.1000
+urllib3<2.0.0
