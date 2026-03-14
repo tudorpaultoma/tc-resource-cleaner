@@ -1,13 +1,13 @@
 # Tencent Cloud Resource Cleaner
 
-Automatically deletes expired CLB (Cloud Load Balancer) and CBS (Cloud Block Storage) resources based on TTL tags and project assignments. Designed to run as a Tencent Cloud SCF (Serverless Cloud Function).
+Automatically deletes expired CLB (Cloud Load Balancer), CBS (Cloud Block Storage), and EIP (Elastic IP) resources based on TTL tags and project assignments. Designed to run as a Tencent Cloud SCF (Serverless Cloud Function).
 
 ## Features
 
-- **Tag-based deletion** — Uses TaggerTTL, TaggerCreated, TaggerCanDelete, TaggerProject, and TaggerLinkedCVM tags
+- **Tag-based deletion** — Uses TaggerTTL, TaggerCreated, TaggerCanDelete, TaggerProject, TaggerLinkedCVM, and TaggerLinkedResource tags
 - **Multi-region support** — Processes 18 Tencent Cloud regions (or specific regions)
 - **Dry-run mode** — Test without actual deletion
-- **Selective processing** — Enable/disable CLB and CBS independently
+- **Selective processing** — Enable/disable CLB, CBS, and EIP independently
 - **Pagination** — Handles accounts with large numbers of resources
 - **SCF deployment** — Runs as serverless function with timer trigger
 
@@ -36,6 +36,7 @@ Creates `scf-resource-cleaner.zip` ready for SCF upload.
 |----------|---------|-------------|
 | `ENABLE_CLB` | `true` | Enable CLB cleanup |
 | `ENABLE_CBS` | `true` | Enable CBS cleanup |
+| `ENABLE_EIP` | `true` | Enable EIP cleanup |
 | `DEFAULT_TTL_DAYS` | `7` | Default TTL if tag value is invalid |
 | `DRY_RUN` | `false` | Set `true` for testing without deletion |
 | `REGIONS` | _(all)_ | Comma-separated regions (e.g. `ap-tokyo,eu-frankfurt`) |
@@ -52,8 +53,10 @@ Attach the CAM policy in `iam-policy.json` to the SCF execution role:
     "action": [
       "name/clb:DescribeLoadBalancers",
       "name/clb:DeleteLoadBalancer",
-      "name/cbs:DescribeDisks",
-      "name/cbs:TerminateDisks"
+      "name/cvm:DescribeDisks",
+      "name/cvm:TerminateDisks",
+      "name/cvm:DescribeAddresses",
+      "name/cvm:ReleaseAddresses"
     ],
     "resource": "*"
   }]
@@ -79,6 +82,7 @@ Resources must have these tags to be evaluated:
 | `TaggerCanDelete` | No | Explicit delete flag | `YES` / `NO` |
 | `TaggerProject` | No | Project assignment | project name or `n/a` |
 | `TaggerLinkedCVM` | CBS only | Attached to CVM | `YES` / `NO` |
+| `TaggerLinkedResource` | EIP only | Bound instance ID or NONE | `ins-abc123` / `NONE` |
 
 ## Deletion Strategy
 
@@ -105,12 +109,30 @@ Resources must have these tags to be evaluated:
 - TTL not expired
 - Missing required tags
 
+### EIP (Elastic IP)
+
+**Skip immediately if:**
+- EIP is bound to an instance (status `BIND`/`BIND_ENI` or `TaggerLinkedResource` ≠ `NONE`)
+- EIP status is not `UNBIND` (only unbound EIPs can be released)
+
+**Delete if TTL expired AND status is UNBIND AND:**
+1. `TaggerCanDelete=YES`, OR
+2. `TaggerCanDelete=NO` + `TaggerProject=n/a`, OR
+3. No `TaggerCanDelete` tag + `TaggerProject` is `n/a` or missing
+
+**Never delete if:**
+- Bound to an instance (will be cleaned with the CVM)
+- `TaggerCanDelete=NO` + `TaggerProject` has a real value
+- TTL not expired
+- Missing required tags
+
 ## Local Testing
 
 ```bash
 export DRY_RUN=true
 export ENABLE_CLB=true
 export ENABLE_CBS=true
+export ENABLE_EIP=true
 export TENCENTCLOUD_SECRETID=your_id
 export TENCENTCLOUD_SECRETKEY=your_key
 

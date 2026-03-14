@@ -10,6 +10,7 @@ from tencentcloud.common.profile.http_profile import HttpProfile
 from tencentcloud.common.exception.tencent_cloud_sdk_exception import TencentCloudSDKException
 from tencentcloud.clb.v20180317 import clb_client, models as clb_models
 from tencentcloud.cbs.v20170312 import cbs_client, models as cbs_models
+from tencentcloud.vpc.v20170312 import vpc_client, models as vpc_models
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -19,12 +20,14 @@ DRY_RUN = os.environ.get('DRY_RUN', 'false').lower() == 'true'
 REGIONS = os.environ.get('REGIONS', '').split(',') if os.environ.get('REGIONS') else []
 ENABLE_CLB = os.environ.get('ENABLE_CLB', 'true').lower() == 'true'
 ENABLE_CBS = os.environ.get('ENABLE_CBS', 'true').lower() == 'true'
+ENABLE_EIP = os.environ.get('ENABLE_EIP', 'true').lower() == 'true'
 
 TAG_CAN_DELETE = 'TaggerCanDelete'
 TAG_TTL = 'TaggerTTL'
 TAG_CREATED = 'TaggerCreated'
 TAG_PROJECT = 'TaggerProject'
 TAG_LINKED_CVM = 'TaggerLinkedCVM'
+TAG_LINKED_RESOURCE = 'TaggerLinkedResource'
 TAG_USAGE = 'TaggerUsage'
 
 
@@ -68,8 +71,26 @@ class ResourceCleaner:
                 'deleted': 0,
                 'skipped': 0,
                 'errors': 0
+            },
+            'eip': {
+                'total_scanned': 0,
+                'pending_deletion': 0,
+                'deleted': 0,
+                'skipped': 0,
+                'errors': 0
             }
         }
+    
+    def get_vpc_client(self, region: str):
+        if self.token:
+            cred = credential.Credential(self.secret_id, self.secret_key, self.token)
+        else:
+            cred = credential.Credential(self.secret_id, self.secret_key)
+        http_profile = HttpProfile()
+        http_profile.endpoint = "vpc.tencentcloudapi.com"
+        client_profile = ClientProfile()
+        client_profile.httpProfile = http_profile
+        return vpc_client.VpcClient(cred, region, client_profile)
     
     def get_clb_client(self, region: str):
         if self.token:
@@ -404,6 +425,180 @@ class ResourceCleaner:
                 logger.info(f"CBS {disk_id} ({disk_name}) skipped: {reason}")
                 self.stats['cbs']['skipped'] += 1
     
+    def get_eip_tag_value(self, tags: List, tag_key: str) -> Optional[str]:
+        """EIP tags use Key/Value instead of TagKey/TagValue."""
+        if not tags:
+            return None
+        for tag in tags:
+            key = getattr(tag, 'Key', None) or getattr(tag, 'TagKey', None)
+            value = getattr(tag, 'Value', None) or getattr(tag, 'TagValue', None)
+            if key == tag_key:
+                return value
+        return None
+    
+    def should_delete_eip(self, eip_info: Dict) -> tuple[bool, str]:
+        address_id = eip_info.get('AddressId', 'unknown')
+        address_status = eip_info.get('AddressStatus', '')
+        instance_id = eip_info.get('InstanceId', '')
+        tags = eip_info.get('Tags', [])
+        
+        tag_ttl = self.get_eip_tag_value(tags, TAG_TTL)
+        tag_created = self.get_eip_tag_value(tags, TAG_CREATED)
+        tag_can_delete = self.get_eip_tag_value(tags, TAG_CAN_DELETE)
+        tag_project = self.get_eip_tag_value(tags, TAG_PROJECT)
+        tag_linked_resource = self.get_eip_tag_value(tags, TAG_LINKED_RESOURCE)
+        
+        # If bound to an instance, skip — it will be deleted with the CVM
+        if address_status == 'BIND' or address_status == 'BIND_ENI':
+            return False, f"Bound to instance ({instance_id}), will be cleaned with CVM"
+        if tag_linked_resource and tag_linked_resource.upper() != 'NONE':
+            return False, f"TaggerLinkedResource={tag_linked_resource}, bound to instance"
+        
+        # Only UNBIND status EIPs can be released
+        if address_status != 'UNBIND':
+            return False, f"Status is {address_status}, only UNBIND can be released"
+        
+        if not tag_ttl or not tag_created:
+            return False, f"Missing required tags (TaggerTTL or TaggerCreated)"
+        
+        try:
+            ttl_days = int(tag_ttl)
+        except ValueError:
+            logger.warning(f"Invalid TTL value '{tag_ttl}' for EIP {address_id}, using default {DEFAULT_TTL_DAYS}")
+            ttl_days = DEFAULT_TTL_DAYS
+        
+        created_date = self.parse_date(tag_created)
+        if not created_date:
+            return False, f"Invalid TaggerCreated date format: {tag_created}"
+        
+        current_date = datetime.now()
+        age_days = (current_date - created_date).days
+        
+        if age_days < ttl_days:
+            return False, f"Not expired yet (age: {age_days} days, TTL: {ttl_days} days)"
+        
+        # TTL expired — apply deletion rules
+        if tag_can_delete and tag_can_delete.upper() == 'YES':
+            return True, f"TTL expired ({age_days}/{ttl_days} days) and TaggerCanDelete=YES"
+        
+        if tag_can_delete and tag_can_delete.upper() == 'NO':
+            if tag_project and tag_project.lower() != 'n/a':
+                return False, f"TTL expired but TaggerCanDelete=NO and TaggerProject={tag_project}"
+            else:
+                return True, f"TTL expired ({age_days}/{ttl_days} days), TaggerCanDelete=NO but TaggerProject=n/a"
+        
+        # No explicit TaggerCanDelete tag
+        if tag_project and tag_project.lower() != 'n/a':
+            return False, f"TTL expired but TaggerProject={tag_project} (no explicit delete tag)"
+        
+        return True, f"TTL expired ({age_days}/{ttl_days} days) and no protection (TaggerProject=n/a or missing)"
+    
+    def describe_eips_with_tags(self, region: str) -> List:
+        try:
+            client = self.get_vpc_client(region)
+            all_eips = []
+            offset = 0
+            limit = 100
+            
+            while True:
+                request = vpc_models.DescribeAddressesRequest()
+                params = {"Offset": offset, "Limit": limit}
+                request.from_json_string(json.dumps(params))
+                
+                response = client.DescribeAddresses(request)
+                eips = response.AddressSet if hasattr(response, 'AddressSet') else []
+                total = response.TotalCount if hasattr(response, 'TotalCount') else 0
+                all_eips.extend(eips)
+                
+                if len(all_eips) >= total or len(eips) == 0:
+                    break
+                offset += limit
+            
+            # Filter: only EIPs that have a TaggerTTL tag
+            tagged_eips = []
+            for eip in all_eips:
+                tags = getattr(eip, 'TagSet', []) or []
+                for tag in tags:
+                    key = getattr(tag, 'Key', None) or getattr(tag, 'TagKey', None)
+                    if key == TAG_TTL:
+                        tagged_eips.append(eip)
+                        break
+            
+            logger.info(f"Found {len(all_eips)} total EIPs, {len(tagged_eips)} with {TAG_TTL} tag in region {region}")
+            return tagged_eips
+            
+        except TencentCloudSDKException as e:
+            if 'InvalidParameter' in str(e) or 'UnsupportedRegion' in str(e):
+                logger.warning(f"Region {region} returned error: {str(e)}")
+                return []
+            logger.error(f"Failed to describe EIPs in region {region}: {str(e)}")
+            self.stats['eip']['errors'] += 1
+            return []
+        except Exception as e:
+            logger.error(f"Unexpected error in region {region}: {str(e)}")
+            self.stats['eip']['errors'] += 1
+            return []
+    
+    def release_eip(self, region: str, address_id: str) -> bool:
+        try:
+            if DRY_RUN:
+                logger.info(f"[DRY RUN] Would release EIP {address_id} in region {region}")
+                return True
+            
+            client = self.get_vpc_client(region)
+            request = vpc_models.ReleaseAddressesRequest()
+            
+            params = {"AddressIds": [address_id]}
+            request.from_json_string(json.dumps(params))
+            
+            response = client.ReleaseAddresses(request)
+            request_id = response.RequestId
+            
+            logger.info(f"Successfully released EIP {address_id} in region {region} (RequestId: {request_id})")
+            return True
+            
+        except TencentCloudSDKException as e:
+            logger.error(f"Failed to release EIP {address_id} in region {region}: {str(e)}")
+            self.stats['eip']['errors'] += 1
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error releasing EIP {address_id} in region {region}: {str(e)}")
+            self.stats['eip']['errors'] += 1
+            return False
+    
+    def process_eip_region(self, region: str):
+        logger.info(f"Processing EIP in region: {region}")
+        
+        eips = self.describe_eips_with_tags(region)
+        self.stats['eip']['total_scanned'] += len(eips)
+        
+        for eip in eips:
+            address_id = eip.AddressId
+            address_name = getattr(eip, 'AddressName', 'N/A')
+            address_ip = getattr(eip, 'AddressIp', 'N/A')
+            address_status = getattr(eip, 'AddressStatus', 'UNKNOWN')
+            instance_id = getattr(eip, 'InstanceId', '')
+            
+            eip_dict = {
+                'AddressId': address_id,
+                'AddressName': address_name,
+                'AddressStatus': address_status,
+                'InstanceId': instance_id,
+                'Tags': getattr(eip, 'TagSet', [])
+            }
+            
+            should_delete, reason = self.should_delete_eip(eip_dict)
+            
+            if should_delete:
+                logger.info(f"EIP {address_id} ({address_name}, {address_ip}) marked for release: {reason}")
+                self.stats['eip']['pending_deletion'] += 1
+                
+                if self.release_eip(region, address_id):
+                    self.stats['eip']['deleted'] += 1
+            else:
+                logger.info(f"EIP {address_id} ({address_name}, {address_ip}) skipped: {reason}")
+                self.stats['eip']['skipped'] += 1
+    
     def run(self):
         logger.info("=" * 60)
         logger.info("Tencent Cloud Resource Cleaner")
@@ -411,6 +606,7 @@ class ResourceCleaner:
         logger.info(f"Default TTL: {DEFAULT_TTL_DAYS} days")
         logger.info(f"CLB Enabled: {ENABLE_CLB}")
         logger.info(f"CBS Enabled: {ENABLE_CBS}")
+        logger.info(f"EIP Enabled: {ENABLE_EIP}")
         logger.info("=" * 60)
         
         regions = REGIONS if REGIONS and REGIONS[0] else self.get_all_regions()
@@ -422,6 +618,8 @@ class ResourceCleaner:
                     self.process_clb_region(region)
                 if ENABLE_CBS:
                     self.process_cbs_region(region)
+                if ENABLE_EIP:
+                    self.process_eip_region(region)
             except Exception as e:
                 logger.error(f"Failed to process region {region}: {str(e)}")
         
@@ -439,6 +637,12 @@ class ResourceCleaner:
         logger.info(f"  Successfully deleted: {self.stats['cbs']['deleted']}")
         logger.info(f"  Skipped: {self.stats['cbs']['skipped']}")
         logger.info(f"  Errors: {self.stats['cbs']['errors']}")
+        logger.info("EIP:")
+        logger.info(f"  Total scanned: {self.stats['eip']['total_scanned']}")
+        logger.info(f"  Pending release: {self.stats['eip']['pending_deletion']}")
+        logger.info(f"  Successfully released: {self.stats['eip']['deleted']}")
+        logger.info(f"  Skipped: {self.stats['eip']['skipped']}")
+        logger.info(f"  Errors: {self.stats['eip']['errors']}")
         logger.info("=" * 60)
         
         return self.stats
