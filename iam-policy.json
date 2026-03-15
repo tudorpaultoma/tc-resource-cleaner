@@ -10,10 +10,10 @@
         "name/cvm:TerminateDisks",
         "name/cvm:DescribeAddresses",
         "name/cvm:ReleaseAddresses",
-        "name/cvm:DescribeNetworkInterfaces",
-        "name/cvm:DeleteNetworkInterface",
-        "name/cvm:DescribeHaVips",
-        "name/cvm:DeleteHaVip"
+        "name/vpc:DescribeNetworkInterfaces",
+        "name/vpc:DeleteNetworkInterface",
+        "name/vpc:DescribeHaVips",
+        "name/vpc:DeleteHaVip"
       ],
       "resource": "*"
     }

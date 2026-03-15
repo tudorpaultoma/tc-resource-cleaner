@@ -90,17 +90,17 @@ Attach the CAM policy in `iam-policy.json` to the SCF execution role:
       "name/cvm:TerminateDisks",
       "name/cvm:DescribeAddresses",
       "name/cvm:ReleaseAddresses",
-      "name/cvm:DescribeNetworkInterfaces",
-      "name/cvm:DeleteNetworkInterface",
-      "name/cvm:DescribeHaVips",
-      "name/cvm:DeleteHaVip"
+      "name/vpc:DescribeNetworkInterfaces",
+      "name/vpc:DeleteNetworkInterface",
+      "name/vpc:DescribeHaVips",
+      "name/vpc:DeleteHaVip"
     ],
     "resource": "*"
   }]
 }
 ```
 
-> **Note:** CBS, EIP, ENI, and HAVIP actions all use the `cvm` CAM namespace, even though they have separate API endpoints.
+> **Note:** CBS and EIP actions use the `cvm` CAM namespace, while ENI and HAVIP use the `vpc` namespace.
 
 ### 5. Configure Trigger
 
