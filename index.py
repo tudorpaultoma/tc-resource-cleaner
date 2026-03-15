@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Tencent Cloud Resource Cleaner — SCF Handler
+Version: 2.0.0
 
 Automatically deletes expired cloud resources based on TTL tags.
 Service-specific logic lives in the services/ package.
@@ -11,7 +12,7 @@ import json
 import logging
 from typing import Optional
 
-from services import CLBCleaner, CBSCleaner, EIPCleaner, ENICleaner, HAVIPCleaner
+from services import __version__, CLBCleaner, CBSCleaner, EIPCleaner, ENICleaner, HAVIPCleaner
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -56,7 +57,7 @@ def _resolve_credentials():
 
 def run():
     logger.info("=" * 60)
-    logger.info("Tencent Cloud Resource Cleaner")
+    logger.info(f"Tencent Cloud Resource Cleaner v{__version__}")
     logger.info(f"Mode: {'DRY RUN' if DRY_RUN else 'PRODUCTION'}")
     logger.info(f"Default TTL: {DEFAULT_TTL_DAYS} days")
     logger.info(f"Services: CLB={ENABLE_CLB}  CBS={ENABLE_CBS}  EIP={ENABLE_EIP}  ENI={ENABLE_ENI}  HAVIP={ENABLE_HAVIP}")
@@ -113,7 +114,7 @@ def main_handler(event, context):
         stats = run()
         return {
             'statusCode': 200,
-            'body': json.dumps(stats),
+            'body': json.dumps({'version': __version__, **stats}),
         }
     except Exception as e:
         logger.error(f"Fatal error: {e}")

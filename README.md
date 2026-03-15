@@ -1,5 +1,7 @@
 # Tencent Cloud Resource Cleaner
 
+![Version](https://img.shields.io/badge/version-2.0.0-blue)
+
 Automatically deletes expired cloud resources based on TTL tags and project assignments. Designed to run as a Tencent Cloud SCF (Serverless Cloud Function).
 
 ## Supported Services
@@ -200,6 +202,21 @@ python3 index.py
 ## Supported Regions
 
 ap-bangkok, ap-beijing, ap-chengdu, ap-chongqing, ap-guangzhou, ap-hongkong, ap-jakarta, ap-nanjing, ap-seoul, ap-shanghai, ap-shanghai-fsi, ap-shenzhen-fsi, ap-singapore, ap-tokyo, eu-frankfurt, na-ashburn, na-siliconvalley, sa-saopaulo
+
+## Changelog
+
+### v2.0.0
+- **Breaking**: Refactored monolithic `index.py` into modular `services/` package
+- Added ENI (Elastic Network Interface) cleanup
+- Added HAVIP (High Availability Virtual IP) cleanup
+- Shared base class with client factory, tag helpers, TTL logic
+- Added `ENABLE_ENI` and `ENABLE_HAVIP` environment variables
+- Updated IAM policy with ENI/HAVIP permissions
+
+### v1.0.0
+- Initial release with CLB, CBS, EIP cleanup
+- Tag-based TTL deletion strategy
+- Multi-region support, dry-run mode
 
 ## License
 
