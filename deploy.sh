@@ -25,6 +25,7 @@ pip3 install -r requirements.txt -t package/
 # Copy source code
 echo "Copying source code..."
 cp index.py package/
+cp -r services package/
 
 # Create zip package
 echo "Creating deployment package..."
@@ -49,6 +50,8 @@ echo "   - DRY_RUN=false"
 echo "   - ENABLE_CLB=true"
 echo "   - ENABLE_CBS=true"
 echo "   - ENABLE_EIP=true"
+echo "   - ENABLE_ENI=true"
+echo "   - ENABLE_HAVIP=true"
 echo "   - REGIONS=ap-singapore,ap-hongkong (optional)"
 echo "4. Set trigger: Timer (Cron: 0 2 * * * - daily at 2 AM)"
 echo "5. Configure CAM role with required permissions"

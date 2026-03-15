@@ -1,15 +1,44 @@
 # Tencent Cloud Resource Cleaner
 
-Automatically deletes expired CLB (Cloud Load Balancer), CBS (Cloud Block Storage), and EIP (Elastic IP) resources based on TTL tags and project assignments. Designed to run as a Tencent Cloud SCF (Serverless Cloud Function).
+Automatically deletes expired cloud resources based on TTL tags and project assignments. Designed to run as a Tencent Cloud SCF (Serverless Cloud Function).
+
+## Supported Services
+
+| Service | Description | Delete API |
+|---------|-------------|------------|
+| **CLB** | Cloud Load Balancer | `DeleteLoadBalancer` |
+| **CBS** | Cloud Block Storage | `TerminateDisks` |
+| **EIP** | Elastic IP | `ReleaseAddresses` |
+| **ENI** | Elastic Network Interface | `DeleteNetworkInterface` |
+| **HAVIP** | High Availability Virtual IP | `DeleteHaVip` |
+
+## Project Structure
+
+```
+tc-resource-cleaner/
+├── index.py              # SCF handler & orchestrator
+├── services/
+│   ├── __init__.py       # Package exports
+│   ├── base.py           # Shared base class (client factory, tag helpers, TTL logic)
+│   ├── clb.py            # CLB cleanup
+│   ├── cbs.py            # CBS cleanup
+│   ├── eip.py            # EIP cleanup
+│   ├── eni.py            # ENI cleanup
+│   └── havip.py          # HAVIP cleanup
+├── iam-policy.json       # CAM policy template
+├── deploy.sh             # Build deployment package
+├── requirements.txt      # Python dependencies
+└── README.md
+```
 
 ## Features
 
 - **Tag-based deletion** — Uses TaggerTTL, TaggerCreated, TaggerCanDelete, TaggerProject, TaggerLinkedCVM, and TaggerLinkedResource tags
 - **Multi-region support** — Processes 18 Tencent Cloud regions (or specific regions)
 - **Dry-run mode** — Test without actual deletion
-- **Selective processing** — Enable/disable CLB, CBS, and EIP independently
+- **Selective processing** — Enable/disable each service independently
 - **Pagination** — Handles accounts with large numbers of resources
-- **SCF deployment** — Runs as serverless function with timer trigger
+- **Modular design** — Each service in its own module, shared base class
 
 ## Deployment
 
@@ -37,6 +66,8 @@ Creates `scf-resource-cleaner.zip` ready for SCF upload.
 | `ENABLE_CLB` | `true` | Enable CLB cleanup |
 | `ENABLE_CBS` | `true` | Enable CBS cleanup |
 | `ENABLE_EIP` | `true` | Enable EIP cleanup |
+| `ENABLE_ENI` | `true` | Enable ENI cleanup |
+| `ENABLE_HAVIP` | `true` | Enable HAVIP cleanup |
 | `DEFAULT_TTL_DAYS` | `7` | Default TTL if tag value is invalid |
 | `DRY_RUN` | `false` | Set `true` for testing without deletion |
 | `REGIONS` | _(all)_ | Comma-separated regions (e.g. `ap-tokyo,eu-frankfurt`) |
@@ -56,12 +87,18 @@ Attach the CAM policy in `iam-policy.json` to the SCF execution role:
       "name/cvm:DescribeDisks",
       "name/cvm:TerminateDisks",
       "name/cvm:DescribeAddresses",
-      "name/cvm:ReleaseAddresses"
+      "name/cvm:ReleaseAddresses",
+      "name/cvm:DescribeNetworkInterfaces",
+      "name/cvm:DeleteNetworkInterface",
+      "name/cvm:DescribeHaVips",
+      "name/cvm:DeleteHaVip"
     ],
     "resource": "*"
   }]
 }
 ```
+
+> **Note:** CBS, EIP, ENI, and HAVIP actions all use the `cvm` CAM namespace, even though they have separate API endpoints.
 
 ### 5. Configure Trigger
 
@@ -82,7 +119,7 @@ Resources must have these tags to be evaluated:
 | `TaggerCanDelete` | No | Explicit delete flag | `YES` / `NO` |
 | `TaggerProject` | No | Project assignment | project name or `n/a` |
 | `TaggerLinkedCVM` | CBS only | Attached to CVM | `YES` / `NO` |
-| `TaggerLinkedResource` | EIP only | Bound instance ID or NONE | `ins-abc123` / `NONE` |
+| `TaggerLinkedResource` | EIP/ENI | Bound instance ID or NONE | `ins-abc123` / `NONE` |
 
 ## Deletion Strategy
 
@@ -120,11 +157,30 @@ Resources must have these tags to be evaluated:
 2. `TaggerCanDelete=NO` + `TaggerProject=n/a`, OR
 3. No `TaggerCanDelete` tag + `TaggerProject` is `n/a` or missing
 
-**Never delete if:**
-- Bound to an instance (will be cleaned with the CVM)
-- `TaggerCanDelete=NO` + `TaggerProject` has a real value
+### ENI (Elastic Network Interface)
+
+**Skip immediately if:**
+- Primary ENI (deleted with CVM)
+- Attached to a CVM instance
+- State is not `AVAILABLE`
+- `TaggerLinkedResource` ≠ `NONE`
+
+**Delete if TTL expired AND detached AND:**
+1. `TaggerCanDelete=YES`, OR
+2. `TaggerCanDelete=NO` + `TaggerProject=n/a`, OR
+3. No `TaggerCanDelete` tag + `TaggerProject` is `n/a` or missing
+
+### HAVIP (High Availability Virtual IP)
+
+**Delete if TTL expired AND:**
+1. `TaggerCanDelete=YES`, OR
+2. `TaggerCanDelete=NO` + `TaggerProject=n/a`, OR
+3. No `TaggerCanDelete` tag + `TaggerProject` is `n/a` or missing
+
+**Skip if:**
 - TTL not expired
-- Missing required tags
+- `TaggerCanDelete=NO` + `TaggerProject` has a real value
+- Missing `TaggerTTL` or `TaggerCreated` tags
 
 ## Local Testing
 
@@ -133,6 +189,8 @@ export DRY_RUN=true
 export ENABLE_CLB=true
 export ENABLE_CBS=true
 export ENABLE_EIP=true
+export ENABLE_ENI=true
+export ENABLE_HAVIP=true
 export TENCENTCLOUD_SECRETID=your_id
 export TENCENTCLOUD_SECRETKEY=your_key
 

@@ -9,7 +9,11 @@
         "name/cvm:DescribeDisks",
         "name/cvm:TerminateDisks",
         "name/cvm:DescribeAddresses",
-        "name/cvm:ReleaseAddresses"
+        "name/cvm:ReleaseAddresses",
+        "name/cvm:DescribeNetworkInterfaces",
+        "name/cvm:DeleteNetworkInterface",
+        "name/cvm:DescribeHaVips",
+        "name/cvm:DeleteHaVip"
       ],
       "resource": "*"
     }
