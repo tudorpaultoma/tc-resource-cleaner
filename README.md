@@ -1,6 +1,6 @@
 # Tencent Cloud Resource Cleaner
 
-![Version](https://img.shields.io/badge/version-2.0.0-blue)
+![Version](https://img.shields.io/badge/version-3.0.0-blue)
 
 Automatically deletes expired cloud resources based on TTL tags and project assignments. Designed to run as a Tencent Cloud SCF (Serverless Cloud Function).
 
@@ -13,6 +13,9 @@ Automatically deletes expired cloud resources based on TTL tags and project assi
 | **EIP** | Elastic IP | `ReleaseAddresses` |
 | **ENI** | Elastic Network Interface | `DeleteNetworkInterface` |
 | **HAVIP** | High Availability Virtual IP | `DeleteHaVip` |
+| **Snapshot** | CBS Snapshot | `DeleteSnapshots` |
+| **NAT** | NAT Gateway (Public) | `DeleteNatGateway` |
+| **AS** | Auto Scaling (Groups + Launch Configs) | `DeleteAutoScalingGroup` / `DeleteLaunchConfiguration` |
 
 ## Project Structure
 
@@ -26,7 +29,10 @@ tc-resource-cleaner/
 │   ├── cbs.py            # CBS cleanup
 │   ├── eip.py            # EIP cleanup
 │   ├── eni.py            # ENI cleanup
-│   └── havip.py          # HAVIP cleanup
+│   ├── havip.py          # HAVIP cleanup
+│   ├── snapshot.py       # CBS Snapshot cleanup
+│   ├── nat.py            # NAT Gateway cleanup
+│   └── autoscaling.py    # Auto Scaling cleanup
 ├── iam-policy.json       # CAM policy template
 ├── deploy.sh             # Build deployment package
 ├── requirements.txt      # Python dependencies
@@ -70,6 +76,9 @@ Creates `scf-resource-cleaner.zip` ready for SCF upload.
 | `ENABLE_EIP` | `true` | Enable EIP cleanup |
 | `ENABLE_ENI` | `true` | Enable ENI cleanup |
 | `ENABLE_HAVIP` | `true` | Enable HAVIP cleanup |
+| `ENABLE_SNAPSHOT` | `true` | Enable CBS Snapshot cleanup |
+| `ENABLE_NAT` | `true` | Enable NAT Gateway cleanup |
+| `ENABLE_AS` | `true` | Enable Auto Scaling cleanup |
 | `DEFAULT_TTL_DAYS` | `7` | Default TTL if tag value is invalid |
 | `DRY_RUN` | `false` | Set `true` for testing without deletion |
 | `REGIONS` | _(all)_ | Comma-separated regions (e.g. `ap-tokyo,eu-frankfurt`) |
@@ -88,27 +97,35 @@ Attach the CAM policy in `iam-policy.json` to the SCF execution role:
       "name/clb:DeleteLoadBalancer",
       "name/cvm:DescribeDisks",
       "name/cvm:TerminateDisks",
+      "name/cvm:DescribeSnapshots",
+      "name/cvm:DeleteSnapshots",
       "name/cvm:DescribeAddresses",
       "name/cvm:ReleaseAddresses",
       "name/vpc:DescribeNetworkInterfaces",
       "name/vpc:DeleteNetworkInterface",
       "name/vpc:DescribeHaVips",
-      "name/vpc:DeleteHaVip"
+      "name/vpc:DeleteHaVip",
+      "name/vpc:DescribeNatGateways",
+      "name/vpc:DeleteNatGateway",
+      "name/as:DescribeAutoScalingGroups",
+      "name/as:DeleteAutoScalingGroup",
+      "name/as:DescribeLaunchConfigurations",
+      "name/as:DeleteLaunchConfiguration"
     ],
     "resource": "*"
   }]
 }
 ```
 
-> **Note:** CBS and EIP actions use the `cvm` CAM namespace, while ENI and HAVIP use the `vpc` namespace.
+> **Note:** CBS, Snapshot, and EIP actions use the `cvm` CAM namespace. ENI, HAVIP, and NAT Gateway use the `vpc` namespace. Auto Scaling uses the `as` namespace.
 
 ### 5. Configure Trigger
 
 **Timer (Cron):**
 ```
-0 2 * * *
+0 20 * * *
 ```
-Runs daily at 2 AM UTC.
+Runs daily at 8 PM.
 
 ## Tag Structure
 
@@ -179,10 +196,38 @@ Resources must have these tags to be evaluated:
 2. `TaggerCanDelete=NO` + `TaggerProject=n/a`, OR
 3. No `TaggerCanDelete` tag + `TaggerProject` is `n/a` or missing
 
-**Skip if:**
-- TTL not expired
-- `TaggerCanDelete=NO` + `TaggerProject` has a real value
-- Missing `TaggerTTL` or `TaggerCreated` tags
+### Snapshot (CBS Snapshot)
+
+**Skip immediately if:**
+- Snapshot state is not `NORMAL`
+
+**Delete if TTL expired AND state is NORMAL AND:**
+1. `TaggerCanDelete=YES`, OR
+2. `TaggerCanDelete=NO` + `TaggerProject=n/a`, OR
+3. No `TaggerCanDelete` tag + `TaggerProject` is `n/a` or missing
+
+### NAT Gateway (Public)
+
+**Delete if TTL expired AND:**
+1. `TaggerCanDelete=YES`, OR
+2. `TaggerCanDelete=NO` + `TaggerProject=n/a`, OR
+3. No `TaggerCanDelete` tag + `TaggerProject` is `n/a` or missing
+
+### Auto Scaling
+
+**Scaling Groups — Skip immediately if:**
+- Group has running instances (`InstanceCount > 0`)
+
+**Scaling Groups — Delete if TTL expired AND no instances AND:**
+1. `TaggerCanDelete=YES`, OR
+2. `TaggerCanDelete=NO` + `TaggerProject=n/a`, OR
+3. No `TaggerCanDelete` tag + `TaggerProject` is `n/a` or missing
+
+**Launch Configurations — Skip immediately if:**
+- Referenced by an active scaling group
+
+**Launch Configurations — Delete if TTL expired AND not referenced AND:**
+- Same standard deletion criteria as above
 
 ## Local Testing
 
@@ -193,6 +238,9 @@ export ENABLE_CBS=true
 export ENABLE_EIP=true
 export ENABLE_ENI=true
 export ENABLE_HAVIP=true
+export ENABLE_SNAPSHOT=true
+export ENABLE_NAT=true
+export ENABLE_AS=true
 export TENCENTCLOUD_SECRETID=your_id
 export TENCENTCLOUD_SECRETKEY=your_key
 
@@ -204,6 +252,14 @@ python3 index.py
 ap-bangkok, ap-beijing, ap-chengdu, ap-chongqing, ap-guangzhou, ap-hongkong, ap-jakarta, ap-nanjing, ap-seoul, ap-shanghai, ap-shanghai-fsi, ap-shenzhen-fsi, ap-singapore, ap-tokyo, eu-frankfurt, na-ashburn, na-siliconvalley, sa-saopaulo
 
 ## Changelog
+
+### v3.0.0
+- **New service**: CBS Snapshot cleanup (`DeleteSnapshots`)
+- **New service**: NAT Gateway (public) cleanup (`DeleteNatGateway`)
+- **New service**: Auto Scaling cleanup (Groups + Launch Configurations)
+- **Bugfix**: CBS disk tag format — fixed `TagKey/TagValue` → `Key/Value` (disks were not being detected)
+- Added `ENABLE_SNAPSHOT`, `ENABLE_NAT`, `ENABLE_AS` environment variables
+- Updated IAM policy with Snapshot, NAT Gateway, and Auto Scaling permissions
 
 ### v2.0.0
 - **Breaking**: Refactored monolithic `index.py` into modular `services/` package

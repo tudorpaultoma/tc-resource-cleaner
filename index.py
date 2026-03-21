@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Tencent Cloud Resource Cleaner — SCF Handler
-Version: 2.0.0
+Version: 3.0.0
 
 Automatically deletes expired cloud resources based on TTL tags.
 Service-specific logic lives in the services/ package.
@@ -10,9 +10,8 @@ Service-specific logic lives in the services/ package.
 import os
 import json
 import logging
-from typing import Optional
 
-from services import __version__, CLBCleaner, CBSCleaner, EIPCleaner, ENICleaner, HAVIPCleaner
+from services import __version__, CLBCleaner, CBSCleaner, EIPCleaner, ENICleaner, HAVIPCleaner, SnapshotCleaner, NATCleaner, ASCleaner
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -26,6 +25,9 @@ ENABLE_CBS = os.environ.get('ENABLE_CBS', 'true').lower() == 'true'
 ENABLE_EIP = os.environ.get('ENABLE_EIP', 'true').lower() == 'true'
 ENABLE_ENI = os.environ.get('ENABLE_ENI', 'true').lower() == 'true'
 ENABLE_HAVIP = os.environ.get('ENABLE_HAVIP', 'true').lower() == 'true'
+ENABLE_SNAPSHOT = os.environ.get('ENABLE_SNAPSHOT', 'true').lower() == 'true'
+ENABLE_NAT = os.environ.get('ENABLE_NAT', 'true').lower() == 'true'
+ENABLE_AS = os.environ.get('ENABLE_AS', 'true').lower() == 'true'
 
 ALL_REGIONS = [
     'ap-bangkok', 'ap-beijing', 'ap-chengdu', 'ap-chongqing',
@@ -59,8 +61,8 @@ def run():
     logger.info("=" * 60)
     logger.info(f"Tencent Cloud Resource Cleaner v{__version__}")
     logger.info(f"Mode: {'DRY RUN' if DRY_RUN else 'PRODUCTION'}")
+    logger.info(f"Services: CLB={ENABLE_CLB}  CBS={ENABLE_CBS}  EIP={ENABLE_EIP}  ENI={ENABLE_ENI}  HAVIP={ENABLE_HAVIP}  SNAP={ENABLE_SNAPSHOT}  NAT={ENABLE_NAT}  AS={ENABLE_AS}")
     logger.info(f"Default TTL: {DEFAULT_TTL_DAYS} days")
-    logger.info(f"Services: CLB={ENABLE_CLB}  CBS={ENABLE_CBS}  EIP={ENABLE_EIP}  ENI={ENABLE_ENI}  HAVIP={ENABLE_HAVIP}")
     logger.info("=" * 60)
 
     secret_id, secret_key, token = _resolve_credentials()
@@ -69,11 +71,14 @@ def run():
 
     # Build service cleaners
     service_config = {
-        'clb':   (ENABLE_CLB,   CLBCleaner),
-        'cbs':   (ENABLE_CBS,   CBSCleaner),
-        'eip':   (ENABLE_EIP,   EIPCleaner),
-        'eni':   (ENABLE_ENI,   ENICleaner),
-        'havip': (ENABLE_HAVIP, HAVIPCleaner),
+        'clb':      (ENABLE_CLB,      CLBCleaner),
+        'cbs':      (ENABLE_CBS,      CBSCleaner),
+        'eip':      (ENABLE_EIP,      EIPCleaner),
+        'eni':      (ENABLE_ENI,      ENICleaner),
+        'havip':    (ENABLE_HAVIP,    HAVIPCleaner),
+        'snapshot': (ENABLE_SNAPSHOT, SnapshotCleaner),
+        'nat':      (ENABLE_NAT,      NATCleaner),
+        'as':       (ENABLE_AS,       ASCleaner),
     }
 
     cleaners = {}

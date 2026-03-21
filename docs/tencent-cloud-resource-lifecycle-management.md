@@ -31,7 +31,7 @@ The goal is to **eliminate cloud waste**, **enforce resource ownership**, and **
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                        RESOURCE CREATION                         │
-│  User creates CVM, CLB, CBS, EIP, ENI, or HAVIP                │
+│  User creates CVM, CLB, CBS, EIP, ENI, HAVIP, Snapshot, NAT, or AS group │
 └──────────────────────┬───────────────────────────────────────────┘
                        │
                        ▼
@@ -47,8 +47,8 @@ The goal is to **eliminate cloud waste**, **enforce resource ownership**, and **
 │ ② CVM SCHEDULER     │  │ ③ RESOURCE CLEANER                     │
 │ Every 30 min:       │  │ Daily at 8 PM:                          │
 │ • Stop outside hrs  │  │ • Delete expired CLB, CBS, EIP, ENI,   │
-│ • Start during hrs  │  │   HAVIP based on TTL + project + state  │
-│ • Terminate expired │  │                                         │
+│ • Start during hrs  │  │   HAVIP, Snapshot, NAT, AS based on    │
+│ • Terminate expired │  │   TTL + project + state                 │
 └─────────────────────┘  └─────────────────────────────────────────┘
 ```
 
@@ -63,6 +63,9 @@ The goal is to **eliminate cloud waste**, **enforce resource ownership**, and **
 | **EIP** | Elastic IP | ✅ | — | ✅ |
 | **ENI** | Elastic Network Interface | ✅ | — | ✅ |
 | **HAVIP** | High Availability Virtual IP | ✅ | — | ✅ |
+| **Snapshot** | CBS Snapshot | ✅ | — | ✅ |
+| **NAT** | NAT Gateway (Public) | ✅ | — | ✅ |
+| **AS** | Auto Scaling (Groups + Launch Configs) | ✅ | — | ✅ |
 
 ### 2.4 Region Coverage
 
@@ -95,6 +98,9 @@ Automatically applies a standardized set of tags to every newly created cloud re
 | EIP | `AllocateAddresses`, `TransformAddress` |
 | ENI | `CreateNetworkInterface` |
 | HAVIP | `CreateHaVip` |
+| Snapshot | `CreateSnapshot` |
+| NAT Gateway | `CreateNatGateway` |
+| Auto Scaling | `CreateAutoScalingGroup`, `CreateLaunchConfiguration` |
 
 ### 3.4 Tags Applied
 
@@ -199,7 +205,7 @@ Independent of office hours, the scheduler also evaluates TTL expiration:
 
 ### 5.1 Purpose
 
-Deletes expired non-CVM resources (CLB, CBS, EIP, ENI, HAVIP) based on TTL tags, project assignment, and resource state.
+Deletes expired non-CVM resources (CLB, CBS, EIP, ENI, HAVIP, Snapshot, NAT Gateway, Auto Scaling) based on TTL tags, project assignment, and resource state.
 
 ### 5.2 General Deletion Criteria
 
@@ -258,6 +264,29 @@ Only **detached, secondary** ENIs with expired TTL are deleted.
 
 Follows the general deletion criteria. No additional state checks.
 
+#### Snapshot (CBS Snapshot)
+
+**Pre-check:** Skipped immediately if:
+- Snapshot state is not `NORMAL`
+
+Only snapshots in **NORMAL** state with expired TTL are deleted.
+
+#### NAT Gateway (Public)
+
+Follows the general deletion criteria. No additional state checks.
+
+#### Auto Scaling (Groups + Launch Configurations)
+
+**Scaling Groups — Pre-check:** Skipped immediately if:
+- Group has running instances (`InstanceCount > 0`)
+
+Only **empty** scaling groups (0 instances) with expired TTL are deleted.
+
+**Launch Configurations — Pre-check:** Skipped immediately if:
+- Referenced by an active scaling group
+
+Only **unreferenced** launch configurations with expired TTL are deleted.
+
 ---
 
 ## 6. Protection Mechanisms
@@ -311,6 +340,10 @@ When a resource is created with **no manual tag changes**, the following happens
 | **ENI (secondary, attached)** | TTL=3 | Protected while attached — follows CVM's lifecycle. |
 | **ENI (secondary, detached)** | TTL=3, LinkedResource=NONE | **Deleted after 3 days.** Zero tolerance for detached ENIs. |
 | **HAVIP** | TTL=3, CanDelete=YES, Project=n/a | **Deleted after 3 days.** |
+| **Snapshot** | TTL=3, CanDelete=YES, Project=n/a | **Deleted after 3 days** (only if state is NORMAL). |
+| **NAT Gateway** | TTL=3, CanDelete=YES, Project=n/a | **Deleted after 3 days.** |
+| **AS Group** | TTL=3, CanDelete=YES, Project=n/a | **Deleted after 3 days** (only if 0 running instances). |
+| **AS Launch Config** | TTL=3, CanDelete=YES, Project=n/a | **Deleted after 3 days** (only if not referenced by a group). |
 
 ---
 
@@ -387,7 +420,7 @@ A: Yes. All functions support `DRY_RUN=true`. Set this environment variable to s
 A: The CVM scheduler attempts termination on expired prepaid instances. If the API rejects it, it disables auto-renewal instead. The instance continues running until the prepaid period ends.
 
 **Q: Which services are NOT covered?**
-A: Currently, CDB (databases), NAT Gateways, VPN, and other services are not covered by this system. Only CVM, CDH, CLB, CBS, EIP, ENI, and HAVIP are managed.
+A: Currently, CDB (databases), VPN, and other services are not covered by this system. CVM, CDH, CLB, CBS, EIP, ENI, HAVIP, Snapshot, NAT Gateway, and Auto Scaling are managed.
 
 ---
 

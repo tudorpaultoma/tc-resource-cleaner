@@ -8,7 +8,6 @@ All service cleaners inherit from this class to reuse:
 - Stats tracking
 """
 
-import json
 import logging
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
@@ -16,7 +15,6 @@ from typing import List, Dict, Optional, Tuple
 from tencentcloud.common import credential
 from tencentcloud.common.profile.client_profile import ClientProfile
 from tencentcloud.common.profile.http_profile import HttpProfile
-from tencentcloud.common.exception.tencent_cloud_sdk_exception import TencentCloudSDKException
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +24,6 @@ TAG_CREATED = 'TaggerCreated'
 TAG_PROJECT = 'TaggerProject'
 TAG_LINKED_CVM = 'TaggerLinkedCVM'
 TAG_LINKED_RESOURCE = 'TaggerLinkedResource'
-TAG_USAGE = 'TaggerUsage'
 
 
 class BaseCleaner:

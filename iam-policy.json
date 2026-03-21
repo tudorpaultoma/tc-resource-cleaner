@@ -8,12 +8,20 @@
         "name/clb:DeleteLoadBalancer",
         "name/cvm:DescribeDisks",
         "name/cvm:TerminateDisks",
+        "name/cvm:DescribeSnapshots",
+        "name/cvm:DeleteSnapshots",
         "name/cvm:DescribeAddresses",
         "name/cvm:ReleaseAddresses",
         "name/vpc:DescribeNetworkInterfaces",
         "name/vpc:DeleteNetworkInterface",
         "name/vpc:DescribeHaVips",
-        "name/vpc:DeleteHaVip"
+        "name/vpc:DeleteHaVip",
+        "name/vpc:DescribeNatGateways",
+        "name/vpc:DeleteNatGateway",
+        "name/as:DescribeAutoScalingGroups",
+        "name/as:DeleteAutoScalingGroup",
+        "name/as:DescribeLaunchConfigurations",
+        "name/as:DeleteLaunchConfiguration"
       ],
       "resource": "*"
     }

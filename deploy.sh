@@ -12,7 +12,6 @@ echo "=========================================="
 
 # Clean previous builds
 rm -f ${PACKAGE_NAME}
-rm -f scf-clb-cleaner.zip
 rm -rf package
 
 # Create package directory
@@ -52,7 +51,10 @@ echo "   - ENABLE_CBS=true"
 echo "   - ENABLE_EIP=true"
 echo "   - ENABLE_ENI=true"
 echo "   - ENABLE_HAVIP=true"
+echo "   - ENABLE_SNAPSHOT=true"
+echo "   - ENABLE_NAT=true"
+echo "   - ENABLE_AS=true"
 echo "   - REGIONS=ap-singapore,ap-hongkong (optional)"
-echo "4. Set trigger: Timer (Cron: 0 2 * * * - daily at 2 AM)"
+echo "4. Set trigger: Timer (Cron: 0 20 * * * - daily at 8 PM)"
 echo "5. Configure CAM role with required permissions"
 echo "=========================================="

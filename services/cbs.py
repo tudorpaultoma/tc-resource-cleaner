@@ -12,6 +12,8 @@ Deletion strategy (stricter than CLB/EIP):
 
 API: cbs.tencentcloudapi.com
 CAM namespace: name/cvm:DescribeDisks, name/cvm:TerminateDisks
+
+Note: CBS disk tags use Key/Value attributes (not TagKey/TagValue).
 """
 
 import json
@@ -40,10 +42,10 @@ class CBSCleaner(BaseCleaner):
         disk_id = disk_info.get('DiskId', 'unknown')
         tags = disk_info.get('Tags', [])
 
-        tag_ttl = self.get_tag_value(tags, TAG_TTL)
-        tag_created = self.get_tag_value(tags, TAG_CREATED)
-        tag_project = self.get_tag_value(tags, TAG_PROJECT)
-        tag_linked_cvm = self.get_tag_value(tags, TAG_LINKED_CVM)
+        tag_ttl = self.get_tag_value_kv(tags, TAG_TTL)
+        tag_created = self.get_tag_value_kv(tags, TAG_CREATED)
+        tag_project = self.get_tag_value_kv(tags, TAG_PROJECT)
+        tag_linked_cvm = self.get_tag_value_kv(tags, TAG_LINKED_CVM)
 
         expired, age, ttl, reason = self.check_ttl_expired(disk_id, tag_ttl, tag_created)
         if not expired:
@@ -83,9 +85,14 @@ class CBSCleaner(BaseCleaner):
                     break
                 offset += limit
 
-            tagged = [d for d in all_disks
-                      if any(getattr(t, 'TagKey', None) == TAG_TTL
-                             for t in (getattr(d, 'Tags', []) or []))]
+            tagged = []
+            for d in all_disks:
+                tag_list = getattr(d, 'Tags', []) or []
+                for t in tag_list:
+                    key = getattr(t, 'Key', None) or getattr(t, 'TagKey', None)
+                    if key == TAG_TTL:
+                        tagged.append(d)
+                        break
             logger.info(f"Found {len(all_disks)} total CBS disks, {len(tagged)} with {TAG_TTL} tag in {region}")
             return tagged
 
