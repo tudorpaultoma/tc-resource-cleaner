@@ -18,6 +18,8 @@
         "name/vpc:DeleteHaVip",
         "name/vpc:DescribeNatGateways",
         "name/vpc:DeleteNatGateway",
+        "name/vpc:DescribePrivateNatGateways",
+        "name/vpc:DeletePrivateNatGateway",
         "name/as:DescribeAutoScalingGroups",
         "name/as:DeleteAutoScalingGroup",
         "name/as:DescribeLaunchConfigurations",

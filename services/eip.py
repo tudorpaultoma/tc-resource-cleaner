@@ -2,13 +2,14 @@
 EIP (Elastic IP) Cleaner
 
 Deletion strategy:
-  Skip immediately if bound (BIND/BIND_ENI or TaggerLinkedResource != NONE).
-  Only UNBIND EIPs are candidates.
-
-  Delete if TTL expired AND:
-    1. TaggerCanDelete=YES
-    2. TaggerCanDelete=NO + TaggerProject=n/a
-    3. No TaggerCanDelete + TaggerProject is n/a or missing
+  1. Actively bound (BIND/BIND_ENI) → skip unconditionally.
+  2. UNBIND with TaggerLinkedResource pointing to a former instance
+     (orphaned) → apply a 1-day grace TTL:
+       • If that 1-day TTL has NOT expired → skip (gives operator time to
+         re-attach).
+       • If expired → release only when TaggerProject == "n/a" or missing;
+         otherwise skip (project-protected).
+  3. UNBIND with no linked resource → standard TTL/project/CanDelete logic.
 
 API: vpc.tencentcloudapi.com
 CAM namespace: name/cvm:DescribeAddresses, name/cvm:ReleaseAddresses
@@ -29,6 +30,10 @@ from services.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Grace period (days) before releasing an orphaned EIP whose linked CVM
+# no longer exists.  Gives an operator time to re-attach.
+ORPHAN_GRACE_DAYS = 1
 
 
 class EIPCleaner(BaseCleaner):
@@ -51,14 +56,30 @@ class EIPCleaner(BaseCleaner):
         tag_project = self.get_tag_value_kv(tags, TAG_PROJECT)
         tag_linked_resource = self.get_tag_value_kv(tags, TAG_LINKED_RESOURCE)
 
-        # Bound to instance → skip
+        # Actively bound to a live instance → skip
         if address_status in ('BIND', 'BIND_ENI'):
             return False, f"Bound to instance ({instance_id}), will be cleaned with CVM"
-        if tag_linked_resource and tag_linked_resource.upper() != 'NONE':
-            return False, f"TaggerLinkedResource={tag_linked_resource}, bound to instance"
         if address_status != 'UNBIND':
             return False, f"Status is {address_status}, only UNBIND can be released"
 
+        # Orphaned: UNBIND but TaggerLinkedResource still references a
+        # (likely deleted) instance → use a 1-day grace TTL, then check
+        # project protection.
+        if tag_linked_resource and tag_linked_resource.upper() != 'NONE':
+            expired, age, _, reason = self.check_ttl_expired(
+                address_id, str(ORPHAN_GRACE_DAYS), tag_created)
+            if not expired:
+                return False, (f"Orphaned (TaggerLinkedResource={tag_linked_resource}), "
+                               f"grace period not expired yet ({reason})")
+            # Grace period expired — honour project protection
+            if tag_project and tag_project.lower() != 'n/a':
+                return False, (f"Orphaned & grace expired, but TaggerProject="
+                               f"{tag_project} — protected")
+            return True, (f"Orphaned (TaggerLinkedResource={tag_linked_resource}), "
+                          f"grace {ORPHAN_GRACE_DAYS}d expired (age {age}d), "
+                          f"TaggerProject=n/a — releasing")
+
+        # Normal path: no linked resource
         expired, age, ttl, reason = self.check_ttl_expired(address_id, tag_ttl, tag_created)
         if not expired:
             return False, reason

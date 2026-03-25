@@ -1,19 +1,22 @@
 """
-NAT Gateway (Public) Cleaner
+NAT Gateway (Public + Private) Cleaner
 
-Deletion strategy:
+Covers both gateway types:
+  • Public  NAT  — DescribeNatGateways  / DeleteNatGateway  (nat-xxxx)
+  • Private NAT  — DescribePrivateNatGateways / DeletePrivateNatGateway (intranat-xxxx)
+
+Deletion strategy (identical for both types):
   Delete if TTL expired AND:
     1. TaggerCanDelete=YES
     2. TaggerCanDelete=NO + TaggerProject=n/a
     3. No TaggerCanDelete + TaggerProject is n/a or missing
 
 API: vpc.tencentcloudapi.com
-  - DescribeNatGateways
-  - DeleteNatGateway
+CAM namespace:
+  name/vpc:DescribeNatGateways,  name/vpc:DeleteNatGateway
+  name/vpc:DescribePrivateNatGateways, name/vpc:DeletePrivateNatGateway
 
-CAM namespace: name/vpc:DescribeNatGateways, name/vpc:DeleteNatGateway
-
-Note: NAT Gateway tags use Key/Value attributes in TagSet.
+Note: Both types use Key/Value attributes in TagSet.
 """
 
 import json
@@ -53,9 +56,10 @@ class NATCleaner(BaseCleaner):
 
         return self.standard_delete_decision(tag_can_delete, tag_project, age, ttl)
 
-    # ── Describe ─────────────────────────────────────────────────
+    # ── Describe (public) ────────────────────────────────────────
 
-    def describe_with_tags(self, region: str) -> List:
+    def _describe_public(self, region: str) -> List:
+        """Return tagged public NAT gateways (nat-xxxx)."""
         try:
             client = self._get_client(region)
             all_nats, offset, limit = [], 0, 100
@@ -71,59 +75,124 @@ class NATCleaner(BaseCleaner):
                     break
                 offset += limit
 
-            tagged = []
-            for n in all_nats:
-                tag_set = getattr(n, 'TagSet', []) or []
-                for t in tag_set:
-                    key = getattr(t, 'Key', None) or getattr(t, 'TagKey', None)
-                    if key == TAG_TTL:
-                        tagged.append(n)
-                        break
-
-            logger.info(f"Found {len(all_nats)} total NAT Gateways, {len(tagged)} with {TAG_TTL} tag in {region}")
+            tagged = self._filter_tagged(all_nats)
+            logger.info(f"Found {len(all_nats)} public NAT Gateways, "
+                        f"{len(tagged)} with {TAG_TTL} tag in {region}")
             return tagged
 
         except TencentCloudSDKException as e:
             if 'InvalidParameter' in str(e) or 'UnsupportedRegion' in str(e):
-                logger.warning(f"Region {region} returned error: {e}")
+                logger.warning(f"Region {region} public NAT error: {e}")
                 return []
-            logger.error(f"Failed to describe NAT Gateways in {region}: {e}")
+            logger.error(f"Failed to describe public NAT Gateways in {region}: {e}")
             self.stats['errors'] += 1
             return []
         except Exception as e:
-            logger.error(f"Unexpected error in {region}: {e}")
+            logger.error(f"Unexpected error (public NAT) in {region}: {e}")
             self.stats['errors'] += 1
             return []
 
-    # ── Delete ───────────────────────────────────────────────────
+    # ── Describe (private) ───────────────────────────────────────
 
-    def delete(self, region: str, nat_id: str) -> bool:
+    def _describe_private(self, region: str) -> List:
+        """Return tagged private NAT gateways (intranat-xxxx)."""
+        try:
+            client = self._get_client(region)
+            all_nats, offset, limit = [], 0, 100
+
+            while True:
+                request = vpc_models.DescribePrivateNatGatewaysRequest()
+                request.from_json_string(json.dumps({"Offset": offset, "Limit": limit}))
+                response = client.DescribePrivateNatGateways(request)
+                nats = response.PrivateNatGatewaySet if hasattr(response, 'PrivateNatGatewaySet') else []
+                total = response.TotalCount if hasattr(response, 'TotalCount') else 0
+                all_nats.extend(nats)
+                if len(all_nats) >= total or not nats:
+                    break
+                offset += limit
+
+            tagged = self._filter_tagged(all_nats)
+            logger.info(f"Found {len(all_nats)} private NAT Gateways, "
+                        f"{len(tagged)} with {TAG_TTL} tag in {region}")
+            return tagged
+
+        except TencentCloudSDKException as e:
+            err = str(e)
+            if 'InvalidParameter' in err or 'UnsupportedRegion' in err or 'UnsupportedOperation' in err:
+                logger.warning(f"Region {region} private NAT not supported or error: {e}")
+                return []
+            logger.error(f"Failed to describe private NAT Gateways in {region}: {e}")
+            self.stats['errors'] += 1
+            return []
+        except Exception as e:
+            logger.error(f"Unexpected error (private NAT) in {region}: {e}")
+            self.stats['errors'] += 1
+            return []
+
+    # ── Shared filter helper ─────────────────────────────────────
+
+    def _filter_tagged(self, nats: List) -> List:
+        tagged = []
+        for n in nats:
+            tag_set = getattr(n, 'TagSet', []) or []
+            for t in tag_set:
+                key = getattr(t, 'Key', None) or getattr(t, 'TagKey', None)
+                if key == TAG_TTL:
+                    tagged.append(n)
+                    break
+        return tagged
+
+    # ── Delete (public) ──────────────────────────────────────────
+
+    def _delete_public(self, region: str, nat_id: str) -> bool:
         try:
             if self.dry_run:
-                logger.info(f"[DRY RUN] Would delete NAT Gateway {nat_id} in {region}")
+                logger.info(f"[DRY RUN] Would delete public NAT Gateway {nat_id} in {region}")
                 return True
             client = self._get_client(region)
             request = vpc_models.DeleteNatGatewayRequest()
             request.from_json_string(json.dumps({"NatGatewayId": nat_id}))
             resp = client.DeleteNatGateway(request)
-            logger.info(f"Deleted NAT Gateway {nat_id} in {region} (RequestId: {resp.RequestId})")
+            logger.info(f"Deleted public NAT Gateway {nat_id} in {region} "
+                        f"(RequestId: {resp.RequestId})")
             return True
         except TencentCloudSDKException as e:
-            logger.error(f"Failed to delete NAT Gateway {nat_id} in {region}: {e}")
+            logger.error(f"Failed to delete public NAT Gateway {nat_id} in {region}: {e}")
             self.stats['errors'] += 1
             return False
         except Exception as e:
-            logger.error(f"Unexpected error deleting NAT Gateway {nat_id} in {region}: {e}")
+            logger.error(f"Unexpected error deleting public NAT Gateway {nat_id} in {region}: {e}")
             self.stats['errors'] += 1
             return False
 
-    # ── Process ──────────────────────────────────────────────────
+    # ── Delete (private) ─────────────────────────────────────────
 
-    def process_region(self, region: str):
-        logger.info(f"Processing NAT Gateway in region: {region}")
-        nats = self.describe_with_tags(region)
+    def _delete_private(self, region: str, nat_id: str) -> bool:
+        try:
+            if self.dry_run:
+                logger.info(f"[DRY RUN] Would delete private NAT Gateway {nat_id} in {region}")
+                return True
+            client = self._get_client(region)
+            request = vpc_models.DeletePrivateNatGatewayRequest()
+            request.from_json_string(json.dumps({"NatGatewayId": nat_id}))
+            resp = client.DeletePrivateNatGateway(request)
+            logger.info(f"Deleted private NAT Gateway {nat_id} in {region} "
+                        f"(RequestId: {resp.RequestId})")
+            return True
+        except TencentCloudSDKException as e:
+            logger.error(f"Failed to delete private NAT Gateway {nat_id} in {region}: {e}")
+            self.stats['errors'] += 1
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error deleting private NAT Gateway {nat_id} in {region}: {e}")
+            self.stats['errors'] += 1
+            return False
+
+    # ── Process (shared) ─────────────────────────────────────────
+
+    def _process_list(self, region: str, nats: List, kind: str, delete_fn):
+        """Evaluate and delete a list of NAT gateways."""
         self.stats['total_scanned'] += len(nats)
-
         for nat in nats:
             nat_id = nat.NatGatewayId
             nat_name = getattr(nat, 'NatGatewayName', 'N/A')
@@ -136,10 +205,23 @@ class NATCleaner(BaseCleaner):
 
             should, reason = self.should_delete(nat_dict)
             if should:
-                logger.info(f"NAT Gateway {nat_id} ({nat_name}) marked for deletion: {reason}")
+                logger.info(f"{kind} NAT Gateway {nat_id} ({nat_name}) "
+                            f"marked for deletion: {reason}")
                 self.stats['pending_deletion'] += 1
-                if self.delete(region, nat_id):
+                if delete_fn(region, nat_id):
                     self.stats['deleted'] += 1
             else:
-                logger.info(f"NAT Gateway {nat_id} ({nat_name}) skipped: {reason}")
+                logger.info(f"{kind} NAT Gateway {nat_id} ({nat_name}) "
+                            f"skipped: {reason}")
                 self.stats['skipped'] += 1
+
+    def process_region(self, region: str):
+        logger.info(f"Processing NAT Gateway in region: {region}")
+
+        # Public NAT gateways
+        public_nats = self._describe_public(region)
+        self._process_list(region, public_nats, "Public", self._delete_public)
+
+        # Private NAT gateways
+        private_nats = self._describe_private(region)
+        self._process_list(region, private_nats, "Private", self._delete_private)
