@@ -15,6 +15,7 @@
         "name/cvm:DescribeInstances",
         "name/tke:DescribeEKSContainerInstances",
         "name/vpc:DescribeNetworkInterfaces",
+        "name/vpc:DetachNetworkInterface",
         "name/vpc:DeleteNetworkInterface",
         "name/vpc:DescribeHaVips",
         "name/vpc:DeleteHaVip",

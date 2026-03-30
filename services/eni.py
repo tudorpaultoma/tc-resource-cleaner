@@ -13,6 +13,7 @@ Deletion strategy:
 
 API: vpc.tencentcloudapi.com
   - DescribeNetworkInterfaces
+  - DetachNetworkInterface  (used before delete for orphaned primary ENIs)
   - DeleteNetworkInterface
 
 CAM namespace: name/cvm:DescribeNetworkInterfaces, name/cvm:DeleteNetworkInterface
@@ -158,9 +159,34 @@ class ENICleaner(BaseCleaner):
             self.stats['errors'] += 1
             return []
 
+    # ── Detach ───────────────────────────────────────────────────
+
+    def detach(self, region: str, eni_id: str, instance_id: str) -> bool:
+        """Detach an ENI from its (possibly ghost) instance. Returns True on success."""
+        try:
+            if self.dry_run:
+                logger.info(f"[DRY RUN] Would detach ENI {eni_id} from {instance_id} in {region}")
+                return True
+            client = self._get_client(region)
+            request = vpc_models.DetachNetworkInterfaceRequest()
+            request.from_json_string(json.dumps({
+                "NetworkInterfaceId": eni_id,
+                "InstanceId": instance_id,
+            }))
+            resp = client.DetachNetworkInterface(request)
+            logger.info(f"Detached ENI {eni_id} from {instance_id} in {region} "
+                        f"(RequestId: {resp.RequestId})")
+            return True
+        except TencentCloudSDKException as e:
+            logger.warning(f"Failed to detach ENI {eni_id} from {instance_id} in {region}: {e}")
+            return False
+        except Exception as e:
+            logger.warning(f"Unexpected error detaching ENI {eni_id} in {region}: {e}")
+            return False
+
     # ── Delete ───────────────────────────────────────────────────
 
-    def delete(self, region: str, eni_id: str) -> bool:
+    def delete(self, region: str, eni_id: str, attachment_instance_id: str = '') -> bool:
         try:
             if self.dry_run:
                 logger.info(f"[DRY RUN] Would delete ENI {eni_id} in {region}")
@@ -172,6 +198,28 @@ class ENICleaner(BaseCleaner):
             logger.info(f"Deleted ENI {eni_id} in {region} (RequestId: {resp.RequestId})")
             return True
         except TencentCloudSDKException as e:
+            if 'ResourceInUse' in str(e) and attachment_instance_id:
+                logger.info(f"ENI {eni_id} ResourceInUse — attempting detach from "
+                            f"{attachment_instance_id} first")
+                if self.detach(region, eni_id, attachment_instance_id):
+                    # Retry delete after successful detach
+                    try:
+                        request2 = vpc_models.DeleteNetworkInterfaceRequest()
+                        request2.from_json_string(json.dumps({"NetworkInterfaceId": eni_id}))
+                        resp2 = client.DeleteNetworkInterface(request2)
+                        logger.info(f"Deleted ENI {eni_id} in {region} after detach "
+                                    f"(RequestId: {resp2.RequestId})")
+                        return True
+                    except TencentCloudSDKException as e2:
+                        logger.error(f"Failed to delete ENI {eni_id} in {region} "
+                                     f"even after detach: {e2}")
+                        self.stats['errors'] += 1
+                        return False
+                else:
+                    logger.error(f"Cannot clean ENI {eni_id} in {region}: "
+                                 f"ResourceInUse and detach failed (zombie primary ENI)")
+                    self.stats['errors'] += 1
+                    return False
             logger.error(f"Failed to delete ENI {eni_id} in {region}: {e}")
             self.stats['errors'] += 1
             return False
@@ -195,7 +243,8 @@ class ENICleaner(BaseCleaner):
 
             # Get attached instance ID from Attachment
             attachment = getattr(eni, 'Attachment', None)
-            instance_id = getattr(attachment, 'InstanceId', '') if attachment else ''
+            raw_instance_id = getattr(attachment, 'InstanceId', '') if attachment else ''
+            instance_id = raw_instance_id
 
             # Liveness check: if the instance no longer exists, treat the
             # ENI as orphaned by clearing instance_id.
@@ -217,7 +266,7 @@ class ENICleaner(BaseCleaner):
             if should:
                 logger.info(f"ENI {eni_id} ({eni_name}) marked for deletion: {reason}")
                 self.stats['pending_deletion'] += 1
-                if self.delete(region, eni_id):
+                if self.delete(region, eni_id, raw_instance_id):
                     self.stats['deleted'] += 1
             else:
                 logger.info(f"ENI {eni_id} ({eni_name}) skipped: {reason}")
