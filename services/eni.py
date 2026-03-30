@@ -186,7 +186,8 @@ class ENICleaner(BaseCleaner):
 
     # ── Delete ───────────────────────────────────────────────────
 
-    def delete(self, region: str, eni_id: str, attachment_instance_id: str = '') -> bool:
+    def delete(self, region: str, eni_id: str, attachment_instance_id: str = '',
+               is_primary: bool = False) -> bool:
         try:
             if self.dry_run:
                 logger.info(f"[DRY RUN] Would delete ENI {eni_id} in {region}")
@@ -199,10 +200,21 @@ class ENICleaner(BaseCleaner):
             return True
         except TencentCloudSDKException as e:
             if 'ResourceInUse' in str(e) and attachment_instance_id:
+                # Primary ENIs cannot be detached (API returns
+                # UnsupportedOperation) — skip the futile detach attempt.
+                if is_primary:
+                    logger.warning(
+                        f"ENI {eni_id} is a zombie primary ENI in {region} — "
+                        f"cannot delete (ResourceInUse) and cannot detach "
+                        f"(primary ENIs are non-detachable). "
+                        f"Ghost instance: {attachment_instance_id}. "
+                        f"Requires Tencent Cloud support ticket or console cleanup.")
+                    self.stats['errors'] += 1
+                    return False
+                # Non-primary: attempt detach then retry
                 logger.info(f"ENI {eni_id} ResourceInUse — attempting detach from "
                             f"{attachment_instance_id} first")
                 if self.detach(region, eni_id, attachment_instance_id):
-                    # Retry delete after successful detach
                     try:
                         request2 = vpc_models.DeleteNetworkInterfaceRequest()
                         request2.from_json_string(json.dumps({"NetworkInterfaceId": eni_id}))
@@ -217,7 +229,7 @@ class ENICleaner(BaseCleaner):
                         return False
                 else:
                     logger.error(f"Cannot clean ENI {eni_id} in {region}: "
-                                 f"ResourceInUse and detach failed (zombie primary ENI)")
+                                 f"ResourceInUse and detach failed")
                     self.stats['errors'] += 1
                     return False
             logger.error(f"Failed to delete ENI {eni_id} in {region}: {e}")
@@ -266,7 +278,7 @@ class ENICleaner(BaseCleaner):
             if should:
                 logger.info(f"ENI {eni_id} ({eni_name}) marked for deletion: {reason}")
                 self.stats['pending_deletion'] += 1
-                if self.delete(region, eni_id, raw_instance_id):
+                if self.delete(region, eni_id, raw_instance_id, is_primary=primary):
                     self.stats['deleted'] += 1
             else:
                 logger.info(f"ENI {eni_id} ({eni_name}) skipped: {reason}")
