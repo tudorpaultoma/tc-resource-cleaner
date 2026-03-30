@@ -147,12 +147,14 @@ class BaseCleaner:
 
     @staticmethod
     def parse_date(date_str: str) -> Optional[datetime]:
-        """Parse a date string. Accepts both '%Y-%m-%d' and '%Y-%m-%d %H:%M:%S'."""
+        """Parse a date string. Supports multiple common formats."""
         if not date_str:
             return None
-        for fmt in ('%Y-%m-%d', '%Y-%m-%d %H:%M:%S'):
+        for fmt in ('%Y-%m-%d', '%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%dT%H:%M:%S%z'):
             try:
-                return datetime.strptime(date_str, fmt)
+                dt = datetime.strptime(date_str, fmt)
+                # Strip tzinfo so comparisons with datetime.now() work
+                return dt.replace(tzinfo=None)
             except ValueError:
                 continue
         logger.error(f"Failed to parse date '{date_str}': no matching format")
