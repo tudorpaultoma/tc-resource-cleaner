@@ -8,11 +8,13 @@ All service cleaners inherit from this class to reuse:
 - Stats tracking
 """
 
+import json
 import logging
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 
 from tencentcloud.common import credential
+from tencentcloud.common.exception.tencent_cloud_sdk_exception import TencentCloudSDKException
 from tencentcloud.common.profile.client_profile import ClientProfile
 from tencentcloud.common.profile.http_profile import HttpProfile
 
@@ -45,6 +47,8 @@ class BaseCleaner:
             'skipped': 0,
             'errors': 0,
         }
+        # Cache for instance liveness checks: {(region, instance_id): bool}
+        self._instance_cache: Dict[Tuple[str, str], bool] = {}
 
     def _make_client(self, client_cls, endpoint: str, region: str):
         """Create a Tencent Cloud SDK client."""
@@ -57,6 +61,65 @@ class BaseCleaner:
         client_profile = ClientProfile()
         client_profile.httpProfile = http_profile
         return client_cls(cred, region, client_profile)
+
+    # ── Instance liveness check ──────────────────────────────────
+
+    def instance_exists(self, region: str, instance_id: str) -> bool:
+        """
+        Check whether the instance referenced by *instance_id* still exists.
+        Supports CVM (ins-*) and EKS container instances (eks-*).
+        Results are cached per (region, instance_id) to avoid duplicate calls.
+        """
+        if not instance_id:
+            return False
+        cache_key = (region, instance_id)
+        if cache_key in self._instance_cache:
+            return self._instance_cache[cache_key]
+
+        exists = self._check_instance(region, instance_id)
+        self._instance_cache[cache_key] = exists
+        return exists
+
+    def _check_instance(self, region: str, instance_id: str) -> bool:
+        """Perform the actual API call to verify instance liveness."""
+        try:
+            if instance_id.startswith('ins-'):
+                return self._cvm_instance_exists(region, instance_id)
+            elif instance_id.startswith('eks-'):
+                return self._eks_instance_exists(region, instance_id)
+            else:
+                # Unknown prefix — assume alive to be safe
+                logger.debug(f"Unknown instance prefix for {instance_id}, assuming alive")
+                return True
+        except Exception as e:
+            logger.warning(f"Error checking liveness of {instance_id} in {region}: {e}")
+            # On error, assume alive to be safe
+            return True
+
+    def _cvm_instance_exists(self, region: str, instance_id: str) -> bool:
+        from tencentcloud.cvm.v20170312 import cvm_client, models as cvm_models
+        client = self._make_client(cvm_client.CvmClient, "cvm.tencentcloudapi.com", region)
+        req = cvm_models.DescribeInstancesRequest()
+        req.from_json_string(json.dumps({"InstanceIds": [instance_id]}))
+        resp = client.DescribeInstances(req)
+        total = resp.TotalCount if hasattr(resp, 'TotalCount') else 0
+        exists = total > 0
+        logger.debug(f"CVM {instance_id} in {region}: {'exists' if exists else 'NOT FOUND'}")
+        return exists
+
+    def _eks_instance_exists(self, region: str, instance_id: str) -> bool:
+        from tencentcloud.tke.v20180525 import tke_client, models as tke_models
+        client = self._make_client(tke_client.TkeClient, "tke.tencentcloudapi.com", region)
+        req = tke_models.DescribeEKSContainerInstancesRequest()
+        req.from_json_string(json.dumps({
+            "EksCiIds": [instance_id],
+            "Limit": 1,
+        }))
+        resp = client.DescribeEKSContainerInstances(req)
+        total = resp.TotalCount if hasattr(resp, 'TotalCount') else 0
+        exists = total > 0
+        logger.debug(f"EKS {instance_id} in {region}: {'exists' if exists else 'NOT FOUND'}")
+        return exists
 
     # ── Tag helpers ──────────────────────────────────────────────
 
@@ -84,11 +147,16 @@ class BaseCleaner:
 
     @staticmethod
     def parse_date(date_str: str) -> Optional[datetime]:
-        try:
-            return datetime.strptime(date_str, '%Y-%m-%d')
-        except (ValueError, TypeError) as e:
-            logger.error(f"Failed to parse date '{date_str}': {str(e)}")
+        """Parse a date string. Accepts both '%Y-%m-%d' and '%Y-%m-%d %H:%M:%S'."""
+        if not date_str:
             return None
+        for fmt in ('%Y-%m-%d', '%Y-%m-%d %H:%M:%S'):
+            try:
+                return datetime.strptime(date_str, fmt)
+            except ValueError:
+                continue
+        logger.error(f"Failed to parse date '{date_str}': no matching format")
+        return None
 
     # ── Common TTL / deletion decision ───────────────────────────
 

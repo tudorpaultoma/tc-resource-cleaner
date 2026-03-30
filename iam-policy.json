@@ -12,6 +12,8 @@
         "name/cvm:DeleteSnapshots",
         "name/cvm:DescribeAddresses",
         "name/cvm:ReleaseAddresses",
+        "name/cvm:DescribeInstances",
+        "name/tke:DescribeEKSContainerInstances",
         "name/vpc:DescribeNetworkInterfaces",
         "name/vpc:DeleteNetworkInterface",
         "name/vpc:DescribeHaVips",

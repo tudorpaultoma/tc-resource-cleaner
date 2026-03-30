@@ -2,13 +2,14 @@
 ENI (Elastic Network Interface) Cleaner
 
 Deletion strategy:
-  Skip immediately if attached to a CVM (Attachment.InstanceId is set).
-  Only detached (available) ENIs are candidates.
-
-  Delete if TTL expired AND:
-    1. TaggerCanDelete=YES
-    2. TaggerCanDelete=NO + TaggerProject=n/a
-    3. No TaggerCanDelete + TaggerProject is n/a or missing
+  1. Actively attached to a running CVM → skip unconditionally.
+  2. Primary ENI whose linked resource (TaggerLinkedResource) still exists
+     → skip (deleted with its parent resource).
+  3. Orphaned primary ENI — linked resource (TKE cluster, CVM, etc.) no
+     longer exists → apply a 1-day grace period, then respect project
+     protection before deleting.
+  4. Non-primary, detached (AVAILABLE) ENI → standard TTL/project/CanDelete
+     logic.
 
 API: vpc.tencentcloudapi.com
   - DescribeNetworkInterfaces
@@ -33,6 +34,10 @@ from services.base import (
 
 logger = logging.getLogger(__name__)
 
+# Grace period (days) before deleting an orphaned ENI whose parent
+# resource (TKE cluster, CVM, etc.) no longer exists.
+ORPHAN_GRACE_DAYS = 1
+
 
 class ENICleaner(BaseCleaner):
     service_name = 'eni'
@@ -49,27 +54,62 @@ class ENICleaner(BaseCleaner):
         is_primary = eni_info.get('Primary', False)
         tags = eni_info.get('Tags', [])
 
-        # Never delete primary ENI (it's deleted with the CVM)
-        if is_primary:
-            return False, "Primary ENI (deleted with CVM)"
-
-        # If attached to a CVM, skip — it will be cleaned with the CVM
-        if instance_id:
-            return False, f"Attached to instance {instance_id}, will be cleaned with CVM"
-
-        # Only available (detached) ENIs can be deleted
-        if state and state.upper() != 'AVAILABLE':
-            return False, f"State is {state}, only AVAILABLE ENIs can be deleted"
-
         tag_ttl = self.get_tag_value_kv(tags, TAG_TTL)
         tag_created = self.get_tag_value_kv(tags, TAG_CREATED)
         tag_can_delete = self.get_tag_value_kv(tags, TAG_CAN_DELETE)
         tag_project = self.get_tag_value_kv(tags, TAG_PROJECT)
         tag_linked_resource = self.get_tag_value_kv(tags, TAG_LINKED_RESOURCE)
 
-        if tag_linked_resource and tag_linked_resource.upper() != 'NONE':
-            return False, f"TaggerLinkedResource={tag_linked_resource}, bound to instance"
+        # Actively attached to a running instance → skip
+        if instance_id:
+            return False, f"Attached to instance {instance_id}, will be cleaned with CVM"
 
+        # Primary ENI handling
+        if is_primary:
+            # If TaggerLinkedResource is missing or NONE, we can't verify
+            # the parent — play it safe and skip.
+            if not tag_linked_resource or tag_linked_resource.upper() == 'NONE':
+                return False, "Primary ENI with no linked resource info — skipping"
+
+            # Linked resource is set but the ENI is no longer attached to
+            # any instance → the parent resource (TKE cluster, CVM) was
+            # likely deleted.  Apply orphan grace period + project check.
+            expired, age, _, reason = self.check_ttl_expired(
+                eni_id, str(ORPHAN_GRACE_DAYS), tag_created)
+            if not expired:
+                return False, (f"Orphaned primary ENI "
+                               f"(TaggerLinkedResource={tag_linked_resource}), "
+                               f"grace period not expired yet ({reason})")
+            # Grace period expired — honour project protection
+            if tag_project and tag_project.lower() != 'n/a':
+                return False, (f"Orphaned primary ENI & grace expired, but "
+                               f"TaggerProject={tag_project} — protected")
+            return True, (f"Orphaned primary ENI "
+                          f"(TaggerLinkedResource={tag_linked_resource}), "
+                          f"grace {ORPHAN_GRACE_DAYS}d expired (age {age}d), "
+                          f"TaggerProject=n/a — deleting")
+
+        # Non-primary, must be available/detached
+        if state and state.upper() != 'AVAILABLE':
+            return False, f"State is {state}, only AVAILABLE ENIs can be deleted"
+
+        # Orphaned secondary ENI (linked resource set but detached)
+        if tag_linked_resource and tag_linked_resource.upper() != 'NONE':
+            expired, age, _, reason = self.check_ttl_expired(
+                eni_id, str(ORPHAN_GRACE_DAYS), tag_created)
+            if not expired:
+                return False, (f"Orphaned (TaggerLinkedResource="
+                               f"{tag_linked_resource}), "
+                               f"grace period not expired yet ({reason})")
+            if tag_project and tag_project.lower() != 'n/a':
+                return False, (f"Orphaned & grace expired, but "
+                               f"TaggerProject={tag_project} — protected")
+            return True, (f"Orphaned (TaggerLinkedResource="
+                          f"{tag_linked_resource}), "
+                          f"grace {ORPHAN_GRACE_DAYS}d expired (age {age}d), "
+                          f"TaggerProject=n/a — deleting")
+
+        # Standard path: no linked resource
         expired, age, ttl, reason = self.check_ttl_expired(eni_id, tag_ttl, tag_created)
         if not expired:
             return False, reason
@@ -156,6 +196,13 @@ class ENICleaner(BaseCleaner):
             # Get attached instance ID from Attachment
             attachment = getattr(eni, 'Attachment', None)
             instance_id = getattr(attachment, 'InstanceId', '') if attachment else ''
+
+            # Liveness check: if the instance no longer exists, treat the
+            # ENI as orphaned by clearing instance_id.
+            if instance_id and not self.instance_exists(region, instance_id):
+                logger.info(f"ENI {eni_id} ({eni_name}): attached instance "
+                            f"{instance_id} no longer exists — treating as orphaned")
+                instance_id = ''
 
             eni_dict = {
                 'NetworkInterfaceId': eni_id,
